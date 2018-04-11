@@ -1,7 +1,5 @@
 
 
-
-
 # Load packages -----------------------------------------------------------------------------------------------
 library(shiny)
 library(shinydashboard)
@@ -13,6 +11,76 @@ library(maptools)
 library(raster)
 library(htmltools)
 library(wordcloud)
+library(data.table)
+library(rgeos)
+
+
+#########################################################################################################################################################
+#                                                               pre-processing                                                                          #
+#########################################################################################################################################################
+
+# LINECHART 1 --------------------------------------------------------------------------------------------------------------------------------------------
+db<- read.csv("data/globalterrorismdb_0617dist_REDUCED.csv", na.string = c("", "NA", " ", "."))
+deathXyear<- db%>%
+  group_by(iyear, country_txt)%>%
+  summarize(killed= sum(nkill, na.rm=TRUE))
+
+# MAP --------------------------------------------------------------------------------------------------------------------------------------------------
+# get the world map data
+world_map <- map("world", fill = TRUE, col = 1, plot=FALSE)
+# get just the country names
+world_map_ids <- sapply(strsplit(world_map$names, ':'), function(x) x[1])
+# convert to a SpatialPolygon
+world_sp <- map2SpatialPolygons(world_map, IDs=world_map_ids, proj4string=CRS("+proj=longlat +datum=WGS84"))
+# get the names of the countries from world_sp
+tmp_id_df <- data.frame(ID = names(world_sp))
+# make the rownames the state name as well
+rownames(tmp_id_df) <- names(world_sp)
+# make the SpatialPolygonDataFrame
+world_spdf <- SpatialPolygonsDataFrame(world_sp, tmp_id_df)
+
+#change name of ex-countries
+db1<- db%>% mutate (country_txt = fct_collapse(country_txt, Germany= c("East Germany (GDR)", "Germany","West Germany (FRG)")))
+db1<- db%>% mutate (country_txt = fct_collapse(country_txt, Czech_Republic = c("Czechoslovakia", "Czech Republic")))
+db1<- db%>% mutate (country_txt = fct_collapse(country_txt, Republic_of_Congo = c("Democratic Republic of the Congo", "Republic of the Congo", "People's Republic of the Congo")))
+
+#get the number of death per country
+ndeath<- db1%>% 
+  group_by(country_txt)%>% 
+  summarise(killed = sum(nkill, na.rm=TRUE))   
+
+#rename UK and USA (mismatch with the spatial dataframe names)
+ndeath <- ndeath %>% mutate(country_txt = recode(country_txt, "United States" = "USA", "United Kingdom" = "UK"))
+#change datatype of ndeath to tibble (tidyverse) to a common data.frame (otherwise you can't merge it with the spatialpolygons df)
+ndeath<- as.data.table(ndeath)
+#class(ndeath)
+# merge with the spatial dataframe by country name (left_join by dplyr does not work with spatialpolygondataframes)
+datamap <- merge(world_spdf, ndeath, by.x = 'ID', by.y = 'country_txt')
+
+
+# WORDCLOUD ----------------------------------------------------------------------------------------------------------------------------------------------
+Deaths<- read.csv("data/dbK.csv", na.string = c("", "NA", " ", "."))
+Attacks<- read.csv("data/dbA.csv", na.string = c("", "NA", " ", "."))
+
+# LINECHART 2 --------------------------------------------------------------------------------------------------------------------------------------------
+dbclean <- read.csv("data/dbclean.csv", na.string = c("", "NA", " ", "."))
+#remove unknown terrorist groups and select only the most dangerous ones in history (more than 500 deaths in total)
+terrorg<- dbclean%>%
+  group_by(gname) %>%
+  summarise(killed = sum(nkill, na.rm=TRUE))%>%
+  arrange(desc(killed))%>%filter(killed<100000, killed>500)
+
+#create new dataframe with only the top terrorist groups
+prova<- dbclean[dbclean$gname %in% terrorg$gname, ]
+#now back we go with a dataframe with dead per year for the selected groups
+terrorg<- prova%>%
+  group_by(iyear, gname) %>%
+  summarise(killed = sum(nkill, na.rm=TRUE))%>%
+  arrange(desc(killed))
+
+#########################################################################################################################################################
+#                                                             SHINY APP
+#########################################################################################################################################################
 
 # USER --------------------------------------------------------------------------------------------------------
 
@@ -81,7 +149,7 @@ ui <- dashboardPage(skin = "black",
           fluidPage(
             column(width= 12, box(status = "primary", title = "Terrorism Map", width = 12, solidHeader = TRUE, collapsible = TRUE,
                 fluidRow(
-                  box(width= 3, selectInput("colors", "Choose Color Palette", choices = c("Purples", "Greys", "Greens","YIGn", "YlOrRd", "Blues", "YlOrBr"))),
+                  box(width= 3, selectInput("colors", "Choose Color Palette", choices = c("Purples", "Greys", "Greens", "YlOrRd", "Blues", "YlOrBr"))),
                   box(height = 550, width= 9, title = "Map", leafletOutput("map", height = 500)))))),  
           
           fluidPage(
@@ -123,7 +191,12 @@ server <- function(input,output,server){
   
   #first app: map  
   bins <- c(0, 50, 100, 1000, 2000, 5000, 10000, 30000, 100000)
-  colorpal <- reactive({colorBin(input$colors, domain = datamap$density, bins = bins)})
+  labels <- sprintf("%s</br>Number of terror deaths: %g", datamap$ID, datamap$killed) %>%
+    lapply(HTML)
+  
+  colorpal <- reactive({
+    colorBin(input$colors, domain = datamap$density, bins = bins
+    )})
     
   output$map <- renderLeaflet({
     paletta<- colorpal()
@@ -156,7 +229,7 @@ server <- function(input,output,server){
     else{
       wc_color= brewer.pal(8, "Dark2")}
     
-    x <- dbK
+    x <- Deaths
     wordcloud(x$gname, x$killed, min.freq= input$freq, max.words= input$max, colors= wc_color, random.order=T, rot.per= .20)
   })
   
